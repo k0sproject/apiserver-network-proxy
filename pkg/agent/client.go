@@ -480,7 +480,6 @@ func (a *Client) ServeBiDirectional() {
 			klog.ErrorS(err, "could not read stream")
 			return
 		}
-		klog.V(5).InfoS("[tracing] recv packet", "type", pkt.Type)
 
 		klog.V(5).InfoS("[tracing] recv packet", "type", pkt.Type)
 
