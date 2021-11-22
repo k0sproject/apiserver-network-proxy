@@ -193,7 +193,7 @@ func GenAgentIdentifiers(addrs string) (Identifiers, error) {
 				agentIDs.DefaultRoute = true
 			}
 		default:
-			return agentIDs, fmt.Errorf("Unknown address type: %s", idType)
+			return agentIDs, fmt.Errorf("unknown address type: %s", idType)
 		}
 	}
 	return agentIDs, nil
@@ -251,7 +251,8 @@ func newAgentClient(address, agentID, agentIdentifiers string, cs *ClientSet, op
 // Connect makes the grpc dial to the proxy server. It returns the serverID
 // it connects to.
 func (a *Client) Connect() (int, error) {
-	conn, err := grpc.Dial(a.address, a.opts...)
+	dialCtx, _ := context.WithTimeout(context.Background(), dialTimeout)
+	conn, err := grpc.DialContext(dialCtx, a.address, a.opts...)
 	if err != nil {
 		return 0, err
 	}
@@ -407,12 +408,12 @@ func (a *Client) Serve() {
 			return
 		}
 
-		klog.V(5).InfoS("[tracing] recv packet", "type", pkt.Type)
-
 		if pkt == nil {
 			klog.V(3).Infoln("empty packet received")
 			continue
 		}
+
+		klog.V(5).InfoS("[tracing] recv packet", "type", pkt.Type)
 
 		switch pkt.Type {
 		case client.PacketType_DIAL_REQ:
@@ -467,12 +468,12 @@ func (a *Client) ServeBiDirectional() {
 			klog.ErrorS(err, "could not read stream")
 			return
 		}
-		klog.V(5).InfoS("[tracing] recv packet", "type", pkt.Type)
 
 		if pkt == nil {
 			klog.V(3).Infoln("empty packet received")
 			continue
 		}
+		klog.V(5).InfoS("[tracing] recv packet", "type", pkt.Type)
 
 		switch pkt.Type {
 		case client.PacketType_DIAL_REQ:
@@ -615,7 +616,8 @@ func (a *Client) handleCloseRequest(pkt *client.Packet) {
 	connID := closeReq.ConnectID
 
 	klog.V(4).InfoS("received CLOSE_REQ", "connectionID", connID)
-
+    // TODO: check if there is a connection leak here, too many "failed to find" in logs
+    // TODO: add metrics to compare connections from kas and from proxy
 	ctx, ok := a.connManager.Get(connID)
 	if ok {
 		ctx.cleanup()
