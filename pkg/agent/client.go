@@ -441,6 +441,7 @@ func (a *Client) Serve() {
 // The requests include things like opening a connection to a server,
 // streaming data and close the connection.
 func (a *Client) ServeBiDirectional() {
+	defer a.cs.RemoveClient(a.serverID)
 	defer func() {
 		// close all of conns with remote when Client exits
 		for _, connCtx := range a.connManager.List() {
@@ -567,6 +568,7 @@ func (a *Client) handleDialResponse(pkt *client.Packet) {
 	pd, ok := a.connManager.GetPendingConnection(dialRes.Random)
 	if !ok {
 		// TODO(irozzo)
+		// TODO(soider): check if we leak any connection here
 		klog.Errorf("no pending dial context associated to random %d", dialRes.Random)
 		return
 	}
@@ -616,8 +618,8 @@ func (a *Client) handleCloseRequest(pkt *client.Packet) {
 	connID := closeReq.ConnectID
 
 	klog.V(4).InfoS("received CLOSE_REQ", "connectionID", connID)
-    // TODO: check if there is a connection leak here, too many "failed to find" in logs
-    // TODO: add metrics to compare connections from kas and from proxy
+	// TODO: check if there is a connection leak here, too many "failed to find" in logs
+	// TODO: add metrics to compare connections from kas and from proxy
 	ctx, ok := a.connManager.Get(connID)
 	if ok {
 		ctx.cleanup()
