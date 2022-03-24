@@ -534,7 +534,6 @@ func (a *Client) handleDialRequest(pkt *client.Packet) {
 	connCtx.cleanFunc = func() {
 		<-dialDone
 		if connCtx.conn == nil {
-
 			klog.ErrorS(fmt.Errorf("connection is nil"), "cannot send CLOSE_RESP to nil connection")
 			return
 		}
@@ -543,14 +542,6 @@ func (a *Client) handleDialRequest(pkt *client.Packet) {
 			Payload: &client.Packet_CloseResponse{CloseResponse: &client.CloseResponse{}},
 		}
 		klog.V(4).InfoS("close connection", "connectionID", connID)
-		resp := &client.Packet{
-			Type:    client.PacketType_CLOSE_RSP,
-			Payload: &client.Packet_CloseResponse{CloseResponse: &client.CloseResponse{}},
-		}
-		resp.GetCloseResponse().ConnectID = connID
-
-		close(dataCh)
-		a.connManager.Delete(connID)
 
 		closeResp.GetCloseResponse().ConnectID = connID
 		err := connCtx.conn.Close()
