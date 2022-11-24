@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/client"
 )
 
@@ -51,13 +50,7 @@ func TestProxy_Agent_Disconnect_HTTP_Persistent_Connection(t *testing.T) {
 			defer cleanup()
 
 			runAgent(proxy.agent, stopCh)
-
-			// Wait for agent to register on proxy server
-			wait.Poll(100*time.Millisecond, 5*time.Second, func() (bool, error) {
-
-				ready, _ := proxy.server.Readiness.Ready()
-				return ready, nil
-			})
+			waitForConnectedAgentCount(t, 1, proxy.server)
 
 			// run test client
 
@@ -74,10 +67,7 @@ func TestProxy_Agent_Disconnect_HTTP_Persistent_Connection(t *testing.T) {
 			close(stopCh)
 
 			// Wait for the agent to disconnect
-			wait.Poll(100*time.Millisecond, 5*time.Second, func() (bool, error) {
-				ready, _ := proxy.server.Readiness.Ready()
-				return !ready, nil
-			})
+			waitForConnectedAgentCount(t, 0, proxy.server)
 
 			// Reuse same client to make the request
 			_, err = clientRequest(c, server.URL)
@@ -123,13 +113,8 @@ func TestProxy_Agent_Reconnect(t *testing.T) {
 			}
 			defer cleanup()
 
-			runAgent(proxy.agent, stopCh)
-
-			// Wait for agent to register on proxy server
-			wait.Poll(100*time.Millisecond, 5*time.Second, func() (bool, error) {
-				ready, _ := proxy.server.Readiness.Ready()
-				return ready, nil
-			})
+			cs1 := runAgent(proxy.agent, stopCh)
+			waitForConnectedServerCount(t, 1, cs1)
 
 			// run test client
 
@@ -145,21 +130,13 @@ func TestProxy_Agent_Reconnect(t *testing.T) {
 			close(stopCh)
 
 			// Wait for the agent to disconnect
-			wait.Poll(100*time.Millisecond, 5*time.Second, func() (bool, error) {
-				ready, _ := proxy.server.Readiness.Ready()
-				return !ready, nil
-			})
+			waitForConnectedAgentCount(t, 0, proxy.server)
 
 			// Reconnect agent
 			stopCh2 := make(chan struct{})
-			runAgent(proxy.agent, stopCh2)
 			defer close(stopCh2)
-
-			// Wait for agent to register on proxy server
-			wait.Poll(100*time.Millisecond, 5*time.Second, func() (bool, error) {
-				ready, _ := proxy.server.Readiness.Ready()
-				return ready, nil
-			})
+			cs2 := runAgent(proxy.agent, stopCh2)
+			waitForConnectedServerCount(t, 1, cs2)
 
 			// Proxy requests should work again after agent reconnects
 			c2, err := tc.clientFunction(ctx, proxy.front, server.URL)
@@ -178,17 +155,16 @@ func TestProxy_Agent_Reconnect(t *testing.T) {
 
 func clientRequest(c *http.Client, addr string) ([]byte, error) {
 	r, err := c.Get(addr)
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("http GET %q: %w", addr, err)
 	}
 
 	data, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading response body: %w", err)
 	}
 
-	defer r.Body.Close()
+	r.Body.Close()
 
 	return data, nil
 }
@@ -241,7 +217,7 @@ func createHTTPConnectClient(ctx context.Context, proxyAddr, addr string) (*http
 	}
 
 	c := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			Dial: dialer,
 		},

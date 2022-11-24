@@ -17,11 +17,13 @@ limitations under the License.
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"math/rand"
 	"net"
+	runpprof "runtime/pprof"
 	"sync"
 	"time"
 
@@ -234,16 +236,26 @@ func (cs *ClientSet) connectOnce() error {
 		return err
 	}
 	klog.V(2).InfoS("sync added client connecting to proxy server", "serverID", c.serverID)
+
+	labels := runpprof.Labels(
+		"agentIdentifiers", cs.agentIdentifiers,
+		"serverAddress", cs.address,
+		"serverID", c.serverID,
+	)
 	if features.DefaultMutableFeatureGate.Enabled(features.NodeToMasterTraffic) {
-		go c.ServeBiDirectional()
+		go runpprof.Do(context.Background(), labels, func(context.Context) { c.ServeBiDirectional() })
 	} else {
-		go c.Serve()
+		go runpprof.Do(context.Background(), labels, func(context.Context) { c.Serve() })
 	}
 	return nil
 }
 
 func (cs *ClientSet) Serve() {
-	go cs.sync()
+	labels := runpprof.Labels(
+		"agentIdentifiers", cs.agentIdentifiers,
+		"serverAddress", cs.address,
+	)
+	go runpprof.Do(context.Background(), labels, func(context.Context) { cs.sync() })
 }
 
 func (cs *ClientSet) handleConnection(protocol, address string, conn net.Conn) error {
