@@ -242,11 +242,9 @@ func (cs *ClientSet) connectOnce() error {
 		"serverAddress", cs.address,
 		"serverID", c.serverID,
 	)
-	if features.DefaultMutableFeatureGate.Enabled(features.NodeToMasterTraffic) {
-		go runpprof.Do(context.Background(), labels, func(context.Context) { c.ServeBiDirectional() })
-	} else {
-		go runpprof.Do(context.Background(), labels, func(context.Context) { c.Serve() })
-	}
+	go runpprof.Do(context.Background(), labels, func(context.Context) {
+		c.Serve(features.DefaultMutableFeatureGate.Enabled(features.NodeToMasterTraffic))
+	})
 	return nil
 }
 

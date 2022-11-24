@@ -31,7 +31,7 @@ func TestServeData_NodeToMaster(t *testing.T) {
 	testClient.stream, stream = pipe()
 
 	// Start agent
-	go testClient.ServeBiDirectional()
+	go testClient.Serve(true)
 	defer close(stopCh)
 
 	agentConn, clientConn := net.Pipe()
@@ -145,7 +145,7 @@ func TestServeData_NodeToMasterConnectionFailure(t *testing.T) {
 	testClient.stream, stream = pipe()
 
 	// Start agent
-	go testClient.ServeBiDirectional()
+	go testClient.Serve(false)
 	defer close(stopCh)
 
 	agentConn, _ := net.Pipe()
@@ -198,7 +198,7 @@ func TestServeData_HTTP(t *testing.T) {
 	testClient.stream, stream = pipe()
 
 	// Start agent
-	go testClient.Serve()
+	go testClient.Serve(false)
 	defer close(stopCh)
 
 	// Start test http server as remote service
@@ -299,7 +299,7 @@ func TestClose_Client(t *testing.T) {
 	testClient.stream, stream = pipe()
 
 	// Start agent
-	go testClient.Serve()
+	go testClient.Serve(false)
 	defer close(stopCh)
 
 	// Start test http server as remote service
@@ -421,7 +421,7 @@ func TestFailedSend_DialResp_GRPC(t *testing.T) {
 	}
 
 	// Start agent
-	go testClient.Serve()
+	go testClient.Serve(false)
 
 	// Start test http server as remote service
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -390,7 +390,7 @@ func (a *Client) initializeAuthContext(ctx context.Context) (context.Context, er
 // gRPC stream. Successful Connect is required before Serve. The
 // The requests include things like opening a connection to a server,
 // streaming data and close the connection.
-func (a *Client) Serve() {
+func (a *Client) Serve(biDirectional bool) {
 	defer a.cs.RemoveClient(a.serverID)
 	defer func() {
 		// close all of conns with remote when Client exits
@@ -430,69 +430,12 @@ func (a *Client) Serve() {
 		switch pkt.Type {
 		case client.PacketType_DIAL_REQ:
 			a.handleDialRequest(pkt)
-		case client.PacketType_DATA:
-			data := pkt.GetData()
-			klog.V(4).InfoS("received DATA", "connectionID", data.ConnectID)
-
-			ctx, ok := a.connManager.Get(data.ConnectID)
-			if ok {
-				ctx.send(data.Data)
-			}
-
-		case client.PacketType_CLOSE_REQ:
-			a.handleCloseRequest(pkt)
-		default:
-			klog.V(5).InfoS("unrecognized packet", "type", pkt)
-		}
-	}
-}
-
-// ServeBiDirectional starts to serve proxied requests from proxy server and
-// request coming from the agent over the gRPC stream. Successful Connect is
-// required before ServeBiDirectional.
-// The requests include things like opening a connection to a server,
-// streaming data and close the connection.
-func (a *Client) ServeBiDirectional() {
-	defer a.cs.RemoveClient(a.serverID)
-	defer func() {
-		// close all of conns with remote when Client exits
-		for _, connCtx := range a.connManager.List() {
-			connCtx.cleanup()
-		}
-		klog.V(2).InfoS("cleanup all of conn contexts when client exits", "agentID", a.agentID)
-	}()
-
-	klog.V(2).InfoS("Start serving", "serverID", a.serverID, "agentID", a.agentID)
-	go a.probe()
-	for {
-		select {
-		case <-a.stopCh:
-			klog.V(2).Infoln("stop agent client.")
-			return
-		default:
-		}
-
-		pkt, err := a.Recv()
-		if err != nil {
-			if err == io.EOF {
-				klog.V(2).Infoln("received EOF, exit")
-				return
-			}
-			klog.ErrorS(err, "could not read stream")
-			return
-		}
-
-		if pkt == nil {
-			klog.V(3).InfoS("empty packet received")
-			continue
-		}
-		klog.V(5).InfoS("[tracing] recv packet", "type", pkt.Type)
-
-		switch pkt.Type {
-		case client.PacketType_DIAL_REQ:
-			a.handleDialRequest(pkt)
 		case client.PacketType_DIAL_RSP:
-			a.handleDialResponse(pkt)
+			if biDirectional {
+				a.handleDialResponse(pkt)
+			} else {
+				klog.V(5).InfoS("node-to-master traffic disabled", "type", pkt)
+			}
 		case client.PacketType_DATA:
 			data := pkt.GetData()
 			klog.V(4).InfoS("received DATA", "connectionID", data.ConnectID)
@@ -507,10 +450,11 @@ func (a *Client) ServeBiDirectional() {
 			// Nothing to be done apart from loggin the reception of CLOSE_RSP
 			klog.V(4).InfoS("received CLOSE_RSP", "connectionID", pkt.GetCloseResponse().ConnectID)
 		default:
-			klog.V(2).InfoS("unrecognized packet", "type", pkt)
+			klog.V(5).InfoS("unrecognized packet", "type", pkt)
 		}
 	}
 }
+
 func (a *Client) handleDialRequest(pkt *client.Packet) {
 	klog.V(4).InfoS("received DIAL_REQ", "serverID", a.serverID, "agentID", a.agentID)
 	dialResp := &client.Packet{
