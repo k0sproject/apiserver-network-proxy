@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"runtime"
+	runpprof "runtime/pprof"
 	"strconv"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -22,6 +24,8 @@ import (
 	"sigs.k8s.io/apiserver-network-proxy/pkg/features"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/util"
 )
+
+const ReadHeaderTimeout = 60 * time.Second
 
 func NewAgentCommand(a *Agent, o *options.GrpcProxyAgentOptions) *cobra.Command {
 	cmd := &cobra.Command{
@@ -114,20 +118,27 @@ func (a *Agent) runHealthServer(o *options.GrpcProxyAgentOptions) error {
 	muxHandler.HandleFunc("/ready", readinessHandler)
 	muxHandler.HandleFunc("/readyz", readinessHandler)
 	healthServer := &http.Server{
-		Addr:           net.JoinHostPort(o.HealthServerHost, strconv.Itoa(o.HealthServerPort)),
-		Handler:        muxHandler,
-		MaxHeaderBytes: 1 << 20,
+		Addr:              net.JoinHostPort(o.HealthServerHost, strconv.Itoa(o.HealthServerPort)),
+		Handler:           muxHandler,
+		MaxHeaderBytes:    1 << 20,
+		ReadHeaderTimeout: ReadHeaderTimeout,
 	}
 
-	go func() {
-		err := healthServer.ListenAndServe()
-		if err != nil {
-			klog.ErrorS(err, "health server could not listen")
-		}
-		klog.V(0).Infoln("Health server stopped listening")
-	}()
+	labels := runpprof.Labels(
+		"core", "healthListener",
+		"port", strconv.Itoa(o.HealthServerPort),
+	)
+	go runpprof.Do(context.Background(), labels, func(context.Context) { a.serveHealth(healthServer) })
 
 	return nil
+}
+
+func (a *Agent) serveHealth(healthServer *http.Server) {
+	err := healthServer.ListenAndServe()
+	if err != nil {
+		klog.ErrorS(err, "health server could not listen")
+	}
+	klog.V(0).Infoln("Health server stopped listening")
 }
 
 func (a *Agent) runAdminServer(o *options.GrpcProxyAgentOptions) error {
@@ -150,18 +161,25 @@ func (a *Agent) runAdminServer(o *options.GrpcProxyAgentOptions) error {
 	}
 
 	adminServer := &http.Server{
-		Addr:           fmt.Sprintf("127.0.0.1:%d", o.AdminServerPort),
-		Handler:        muxHandler,
-		MaxHeaderBytes: 1 << 20,
+		Addr:              fmt.Sprintf("127.0.0.1:%d", o.AdminServerPort),
+		Handler:           muxHandler,
+		MaxHeaderBytes:    1 << 20,
+		ReadHeaderTimeout: ReadHeaderTimeout,
 	}
 
-	go func() {
-		err := adminServer.ListenAndServe()
-		if err != nil {
-			klog.ErrorS(err, "admin server could not listen")
-		}
-		klog.V(0).Infoln("Admin server stopped listening")
-	}()
+	labels := runpprof.Labels(
+		"core", "adminListener",
+		"port", strconv.Itoa(o.AdminServerPort),
+	)
+	go runpprof.Do(context.Background(), labels, func(context.Context) { a.serveAdmin(adminServer) })
 
 	return nil
+}
+
+func (a *Agent) serveAdmin(adminServer *http.Server) {
+	err := adminServer.ListenAndServe()
+	if err != nil {
+		klog.ErrorS(err, "admin server could not listen")
+	}
+	klog.V(0).Infoln("Admin server stopped listening")
 }

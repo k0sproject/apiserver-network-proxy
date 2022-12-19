@@ -31,13 +31,16 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/metadata"
 
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	authv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	fakeauthenticationv1 "k8s.io/client-go/kubernetes/typed/authentication/v1/fake"
 	k8stesting "k8s.io/client-go/testing"
 
 	client "sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
+	"sigs.k8s.io/apiserver-network-proxy/pkg/server/metrics"
 	"sigs.k8s.io/apiserver-network-proxy/proto/agent"
 	agentmock "sigs.k8s.io/apiserver-network-proxy/proto/agent/mocks"
 	"sigs.k8s.io/apiserver-network-proxy/proto/header"
@@ -171,9 +174,7 @@ func TestAgentTokenAuthenticationErrorsToken(t *testing.T) {
 				KubernetesClient:    kcs,
 				AgentNamespace:      tc.wantNamespace,
 				AgentServiceAccount: tc.wantServiceAccount,
-			},
-				false,
-			)
+			})
 
 			err := p.Connect(conn)
 			if tc.wantError {
@@ -196,7 +197,7 @@ func TestAddRemoveFrontends(t *testing.T) {
 	agent2ConnID2 := new(ProxyClientConnection)
 	agent3ConnID1 := new(ProxyClientConnection)
 
-	p := NewProxyServer("", []ProxyStrategy{ProxyStrategyDefault}, 1, nil, false)
+	p := NewProxyServer("", []ProxyStrategy{ProxyStrategyDefault}, 1, nil)
 	p.addFrontend("agent1", int64(1), agent1ConnID1)
 	p.removeFrontend("agent1", int64(1))
 	expectedFrontends := make(map[string]map[int64]*ProxyClientConnection)
@@ -204,7 +205,7 @@ func TestAddRemoveFrontends(t *testing.T) {
 		t.Errorf("expected %v, got %v", e, a)
 	}
 
-	p = NewProxyServer("", []ProxyStrategy{ProxyStrategyDefault}, 1, nil, false)
+	p = NewProxyServer("", []ProxyStrategy{ProxyStrategyDefault}, 1, nil)
 	p.addFrontend("agent1", int64(1), agent1ConnID1)
 	p.addFrontend("agent1", int64(2), agent1ConnID2)
 	p.addFrontend("agent2", int64(1), agent2ConnID1)
@@ -261,7 +262,7 @@ func TestNodeToControlPlane(t *testing.T) {
 
 	// create proxy server
 	p := NewProxyServer("", []ProxyStrategy{ProxyStrategyDefault}, 1,
-		&AgentTokenAuthenticationOptions{}, false)
+		&AgentTokenAuthenticationOptions{})
 
 	// start a controlplane server
 	lis, err := net.Listen("tcp", ":0")
@@ -397,7 +398,7 @@ func baseServerProxyTestWithoutBackend(t *testing.T, validate func(*agentmock.Mo
 	defer ctrl.Finish()
 
 	frontendConn := prepareFrontendConn(ctrl)
-	proxyServer := NewProxyServer(uuid.New().String(), []ProxyStrategy{ProxyStrategyDefault}, 1, &AgentTokenAuthenticationOptions{}, true)
+	proxyServer := NewProxyServer(uuid.New().String(), []ProxyStrategy{ProxyStrategyDefault}, 1, &AgentTokenAuthenticationOptions{})
 
 	validate(frontendConn)
 
@@ -414,7 +415,7 @@ func baseServerProxyTestWithBackend(t *testing.T, validate func(*agentmock.MockA
 	frontendConn := prepareFrontendConn(ctrl)
 
 	// prepare proxy server
-	proxyServer := NewProxyServer(uuid.New().String(), []ProxyStrategy{ProxyStrategyDefault}, 1, &AgentTokenAuthenticationOptions{}, true)
+	proxyServer := NewProxyServer(uuid.New().String(), []ProxyStrategy{ProxyStrategyDefault}, 1, &AgentTokenAuthenticationOptions{})
 
 	agentConn := prepareAgentConnMD(ctrl, proxyServer)
 
@@ -463,6 +464,47 @@ func TestServerProxyNoBackend(t *testing.T) {
 
 func TestServerProxyNormalClose(t *testing.T) {
 	validate := func(frontendConn, agentConn *agentmock.MockAgentService_ConnectServer) {
+		const connectID = 123456
+		// receive DIAL_REQ from frontend and proxy to backend
+		dialReq := &client.Packet{
+			Type: client.PacketType_DIAL_REQ,
+			Payload: &client.Packet_DialRequest{
+				DialRequest: &client.DialRequest{
+					Protocol: "tcp",
+					Address:  "127.0.0.1:8080",
+					Random:   111,
+				},
+			},
+		}
+		data := &client.Packet{
+			Type: client.PacketType_DATA,
+			Payload: &client.Packet_Data{
+				Data: &client.Data{
+					ConnectID: connectID,
+				},
+			},
+		}
+
+		gomock.InOrder(
+			frontendConn.EXPECT().Recv().Return(dialReq, nil).Times(1),
+			frontendConn.EXPECT().Recv().Return(data, nil).Times(1),
+			frontendConn.EXPECT().Recv().Return(closePacket(connectID), nil).Times(1),
+			frontendConn.EXPECT().Recv().Return(nil, io.EOF).Times(1),
+		)
+		gomock.InOrder(
+			agentConn.EXPECT().Send(dialReq).Return(nil).Times(1),
+			agentConn.EXPECT().Send(data).Return(nil).Times(1),
+			agentConn.EXPECT().Send(closePacket(connectID)).Return(nil).Times(1),
+			// This extra close is unwanted and should be removed; see
+			// https://github.com/kubernetes-sigs/apiserver-network-proxy/pull/307
+			agentConn.EXPECT().Send(closePacket(connectID)).Return(nil).Times(1),
+		)
+	}
+	baseServerProxyTestWithBackend(t, validate)
+}
+
+func TestServerProxyRecvChanFull(t *testing.T) {
+	validate := func(frontendConn, agentConn *agentmock.MockAgentService_ConnectServer) {
 		// receive DIAL_REQ from frontend and proxy to backend
 		dialReq := &client.Packet{
 			Type: client.PacketType_DIAL_REQ,
@@ -475,32 +517,93 @@ func TestServerProxyNormalClose(t *testing.T) {
 			},
 		}
 
-		// recevie CLOSE_REQ from frontend and proxy to backend
-		closeReq := &client.Packet{
-			Type: client.PacketType_CLOSE_REQ,
-			Payload: &client.Packet_CloseRequest{
-				CloseRequest: &client.CloseRequest{
+		data := &client.Packet{
+			Type: client.PacketType_DATA,
+			Payload: &client.Packet_Data{
+				Data: &client.Data{
 					ConnectID: 1,
-				}},
-		}
-		// This extra close is unwanted and should be removed; see
-		// https://github.com/kubernetes-sigs/apiserver-network-proxy/pull/307
-		extraCloseReq := &client.Packet{
-			Type: client.PacketType_CLOSE_REQ,
-			Payload: &client.Packet_CloseRequest{
-				CloseRequest: &client.CloseRequest{}},
+					Data:      []byte("hello world"),
+				},
+			},
 		}
 
+		const defaultTimeout = 5 * time.Minute
+		deadline := time.Now().Add(defaultTimeout)
+		if testDeadline, ok := t.Deadline(); ok && testDeadline.Before(deadline) {
+			deadline = testDeadline.Add(-1 * time.Second)
+		}
+
+		waitForMetricVal := func(expected float64) {
+			err := wait.Poll(10*time.Millisecond, time.Until(deadline), func() (bool, error) {
+				val := promtest.ToFloat64(metrics.Metrics.FullRecvChannel(metrics.Proxy))
+				return val == expected, nil
+			})
+			if err != nil {
+				t.Fatalf("Failed to observe expected metric: %v", err)
+			}
+		}
+
+		expectMetricVal := func(expected float64) {
+			val := promtest.ToFloat64(metrics.Metrics.FullRecvChannel(metrics.Proxy))
+			if val != expected {
+				t.Errorf("Unexpected metric value: %v (expected %v)", val, expected)
+			}
+		}
+
+		// WaitGroups for coordinating test stages.
+		recvWG := sync.WaitGroup{}
+		recvWG.Add(1)
+		sendWG := sync.WaitGroup{}
+		sendWG.Add(1)
+
 		gomock.InOrder(
-			frontendConn.EXPECT().Recv().Return(dialReq, nil).Times(1),
-			frontendConn.EXPECT().Recv().Return(closeReq, nil).Times(1),
-			frontendConn.EXPECT().Recv().Return(nil, io.EOF).Times(1),
+			frontendConn.EXPECT().Recv().Return(dialReq, nil),
+			// First packet goes through to agentConn.Send
+			frontendConn.EXPECT().Recv().Return(data, nil),
+			// Next xfrChannelSize packets fill the channel.
+			frontendConn.EXPECT().Recv().DoAndReturn(func() (*client.Packet, error) {
+				// Wait for initial packet send before filling the channel.
+				recvWG.Wait()
+				return data, nil
+			}),
+			frontendConn.EXPECT().Recv().Return(data, nil).Times(xfrChannelSize-1),
+			// Last packet should trigger channel full condition.
+			frontendConn.EXPECT().Recv().DoAndReturn(func() (*client.Packet, error) {
+				// Verify that the full channel condition hasn't triggered yet.
+				expectMetricVal(0)
+				return data, nil
+			}),
+
+			frontendConn.EXPECT().Recv().Return(closePacket(1), nil),
+			frontendConn.EXPECT().Recv().Return(nil, io.EOF),
 		)
 		gomock.InOrder(
-			agentConn.EXPECT().Send(dialReq).Return(nil).Times(1),
-			agentConn.EXPECT().Send(closeReq).Return(nil).Times(1),
-			agentConn.EXPECT().Send(extraCloseReq).Return(nil).Times(1),
+			agentConn.EXPECT().Send(dialReq).Return(nil),
+			agentConn.EXPECT().Send(data).DoAndReturn(func(_ *client.Packet) error {
+				// Channel should not be full at this point.
+				expectMetricVal(0)
+				recvWG.Done() // Proceed to fill the channel.
+
+				// Block the send from completing until the full channel condition is detected.
+				waitForMetricVal(1)
+				return nil
+			}),
+			agentConn.EXPECT().Send(data).Return(nil).Times(xfrChannelSize+1), // Expect the remaining packets to be sent.
+			agentConn.EXPECT().Send(closePacket(1)).Return(nil),
+			// This extra close is unwanted and should be removed; see
+			// https://github.com/kubernetes-sigs/apiserver-network-proxy/pull/307
+			agentConn.EXPECT().Send(closePacket(1)).Return(nil),
 		)
 	}
 	baseServerProxyTestWithBackend(t, validate)
+}
+
+func closePacket(connectID int64) *client.Packet {
+	return &client.Packet{
+		Type: client.PacketType_CLOSE_REQ,
+		Payload: &client.Packet_CloseRequest{
+			CloseRequest: &client.CloseRequest{
+				ConnectID: connectID,
+			}},
+	}
 }

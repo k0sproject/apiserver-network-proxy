@@ -24,8 +24,8 @@ endif
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 INSTALL_LOCATION:=$(shell go env GOPATH)/bin
-GOLANGCI_LINT_VERSION ?= 1.35.2
-GOSEC_VERSION ?= 2.5.0
+GOLANGCI_LINT_VERSION ?= 1.45.2
+GOSEC_VERSION ?= 2.13.1
 
 REGISTRY ?= gcr.io/$(shell gcloud config get-value project)
 STAGING_REGISTRY := gcr.io/k8s-staging-kas-network-proxy
@@ -124,11 +124,11 @@ proto/agent/agent.pb.go: proto/agent/agent.proto
 ## --------------------------------------
 
 easy-rsa.tar.gz:
-	curl -L -o easy-rsa.tar.gz --connect-timeout 20 --retry 6 --retry-delay 2 https://github.com/OpenVPN/easy-rsa/archive/refs/tags/v3.0.8.tar.gz
+	curl -L -o easy-rsa.tar.gz --connect-timeout 20 --retry 6 --retry-delay 2 https://storage.googleapis.com/kubernetes-release/easy-rsa/easy-rsa.tar.gz
 
 easy-rsa: easy-rsa.tar.gz
 	tar xvf easy-rsa.tar.gz
-	mv easy-rsa-3.0.8 easy-rsa
+	mv easy-rsa-master easy-rsa
 
 cfssl:
 	@if ! command -v cfssl &> /dev/null; then \
