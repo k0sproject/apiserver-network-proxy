@@ -269,7 +269,8 @@ func newAgentClient(address, agentID, agentIdentifiers string, cs *ClientSet, op
 // Connect makes the grpc dial to the proxy server. It returns the serverID
 // it connects to.
 func (a *Client) Connect() (int, error) {
-	dialCtx, _ := context.WithTimeout(context.Background(), dialTimeout)
+	dialCtx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
 	conn, err := grpc.DialContext(dialCtx, a.address, a.opts...)
 	if err != nil {
 		return 0, err
