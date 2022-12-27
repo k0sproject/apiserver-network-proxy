@@ -79,9 +79,9 @@ type GrpcProxyAgentOptions struct {
 	// The check is an "unlocked" read but is still use at your own peril.
 	WarnOnChannelLimit bool
 
-	SyncForever bool
-	BindAddress        string
-	ApiServerMapping   portMapping
+	SyncForever      bool
+	BindAddress      string
+	APIServerMapping portMapping
 }
 
 var _ pflag.Value = &portMapping{}
@@ -139,7 +139,7 @@ func (o *GrpcProxyAgentOptions) Flags() *pflag.FlagSet {
 	flags.StringVar(&o.ServiceAccountTokenPath, "service-account-token-path", o.ServiceAccountTokenPath, "If non-empty proxy agent uses this token to prove its identity to the proxy server.")
 	flags.StringVar(&o.AgentIdentifiers, "agent-identifiers", o.AgentIdentifiers, "Identifiers of the agent that will be used by the server when choosing agent. N.B. the list of identifiers must be in URL encoded format. e.g.,host=localhost&host=node1.mydomain.com&cidr=127.0.0.1/16&ipv4=1.2.3.4&ipv4=5.6.7.8&ipv6=:::::&default-route=true")
 	flags.BoolVar(&o.WarnOnChannelLimit, "warn-on-channel-limit", o.WarnOnChannelLimit, "Turns on a warning if the system is going to push to a full channel. The check involves an unsafe read.")
-	flags.Var(&o.ApiServerMapping, "apiserver-port-mapping", "Mapping between a local port and the host:port used to reach the Kubernetes API Server")
+	flags.Var(&o.APIServerMapping, "apiserver-port-mapping", "Mapping between a local port and the host:port used to reach the Kubernetes API Server")
 	flags.StringVar(&o.BindAddress, "bind-address", o.BindAddress, "Address used to listen for traffic generated on cluster network")
 	// add feature gates flag
 	features.DefaultMutableFeatureGate.AddFlag(flags)
@@ -170,7 +170,7 @@ func (o *GrpcProxyAgentOptions) Print() {
 	klog.V(1).Infof("WarnOnChannelLimit set to %t.\n", o.WarnOnChannelLimit)
 	if features.DefaultMutableFeatureGate.Enabled(features.NodeToMasterTraffic) {
 		klog.V(1).Infof("AgentBindAddress set to %s.\n", o.BindAddress)
-		klog.V(1).Infof("Apiserver port mapping set to %s.\n", o.ApiServerMapping.String())
+		klog.V(1).Infof("Apiserver port mapping set to %s.\n", o.APIServerMapping.String())
 	}
 	klog.V(1).Infof("SyncForever set to %v.\n", o.SyncForever)
 }
@@ -223,20 +223,20 @@ func (o *GrpcProxyAgentOptions) Validate() error {
 	if err := validateHostnameOrIP(o.BindAddress); err != nil {
 		return fmt.Errorf("agent bind address is invalid: %v", err)
 	}
-	if err := validateHostnameOrIP(o.ApiServerMapping.RemoteHost); err != nil {
+	if err := validateHostnameOrIP(o.APIServerMapping.RemoteHost); err != nil {
 		return fmt.Errorf("apiserver address is invalid: %v", err)
 	}
-	if o.ApiServerMapping.LocalPort > 49151 {
-		return fmt.Errorf("please do not try to use ephemeral port %d for the apiserver local port", o.ApiServerMapping.LocalPort)
+	if o.APIServerMapping.LocalPort > 49151 {
+		return fmt.Errorf("please do not try to use ephemeral port %d for the apiserver local port", o.APIServerMapping.LocalPort)
 	}
-	if o.ApiServerMapping.LocalPort < 1024 {
-		return fmt.Errorf("please do not try to use reserved port %d for the apiserver local port", o.ApiServerMapping.LocalPort)
+	if o.APIServerMapping.LocalPort < 1024 {
+		return fmt.Errorf("please do not try to use reserved port %d for the apiserver local port", o.APIServerMapping.LocalPort)
 	}
-	if o.ApiServerMapping.RemotePort > 49151 {
-		return fmt.Errorf("please do not try to use ephemeral port %d for the apiserver remote port", o.ApiServerMapping.LocalPort)
+	if o.APIServerMapping.RemotePort > 49151 {
+		return fmt.Errorf("please do not try to use ephemeral port %d for the apiserver remote port", o.APIServerMapping.LocalPort)
 	}
-	if o.ApiServerMapping.RemotePort < 1 {
-		return fmt.Errorf("invalid port %d for the apiserver remote port", o.ApiServerMapping.RemotePort)
+	if o.APIServerMapping.RemotePort < 1 {
+		return fmt.Errorf("invalid port %d for the apiserver remote port", o.APIServerMapping.RemotePort)
 	}
 	return nil
 }
@@ -294,7 +294,7 @@ func NewGrpcProxyAgentOptions() *GrpcProxyAgentOptions {
 		ServiceAccountTokenPath:   "",
 		WarnOnChannelLimit:        false,
 		SyncForever:               false,
-		ApiServerMapping:          portMapping{LocalPort: 6443, RemoteHost: "localhost", RemotePort: 6443},
+		APIServerMapping:          portMapping{LocalPort: 6443, RemoteHost: "localhost", RemotePort: 6443},
 		BindAddress:               "127.0.0.1",
 	}
 	return &o

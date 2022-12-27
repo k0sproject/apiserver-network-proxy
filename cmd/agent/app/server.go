@@ -115,8 +115,8 @@ func (a *Agent) runControlPlaneProxy(ctx context.Context, o *options.GrpcProxyAg
 		ClientSet:  cs,
 		ListenHost: o.BindAddress,
 	}
-	klog.V(1).Infof("Exposing apiserver: %s", &o.ApiServerMapping)
-	return pf.Serve(ctx, agent.PortMapping(o.ApiServerMapping))
+	klog.V(1).Infof("Exposing apiserver: %s", &o.APIServerMapping)
+	return pf.Serve(ctx, agent.PortMapping(o.APIServerMapping))
 }
 
 func (a *Agent) runHealthServer(o *options.GrpcProxyAgentOptions) error {
