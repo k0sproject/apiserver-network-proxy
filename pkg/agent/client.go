@@ -35,6 +35,8 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/metadata"
 	"k8s.io/klog/v2"
+
+	commonmetrics "sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/common/metrics"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/agent/metrics"
 	"sigs.k8s.io/apiserver-network-proxy/proto/agent"
@@ -97,6 +99,7 @@ type pendingDialContext struct {
 func (cm *connectionManager) Add(connID int64, ctx *connContext) {
 	cm.connLock.Lock()
 	defer cm.connLock.Unlock()
+	metrics.Metrics.EndpointConnectionInc()
 	cm.connections[connID] = ctx
 }
 
@@ -110,6 +113,9 @@ func (cm *connectionManager) Get(connID int64) (*connContext, bool) {
 func (cm *connectionManager) Delete(connID int64) {
 	cm.connLock.Lock()
 	defer cm.connLock.Unlock()
+	// Delete for a connID is called from cleanFunc, which is
+	// protected by cleanOnce.
+	metrics.Metrics.EndpointConnectionDec()
 	delete(cm.connections, connID)
 }
 
@@ -318,9 +324,12 @@ func (a *Client) Send(pkt *client.Packet) error {
 	a.sendLock.Lock()
 	defer a.sendLock.Unlock()
 
+	const segment = commonmetrics.SegmentFromAgent
+	metrics.Metrics.ObservePacket(segment, pkt.Type)
 	err := a.stream.Send(pkt)
 	if err != nil && err != io.EOF {
-		metrics.Metrics.ObserveFailure(metrics.DirectionToServer)
+		metrics.Metrics.ObserveServerFailureDeprecated(metrics.DirectionToServer)
+		metrics.Metrics.ObserveStreamError(segment, err, pkt.Type)
 		a.cs.RemoveClient(a.serverID)
 	}
 	return err
@@ -332,7 +341,8 @@ func (a *Client) Recv() (*client.Packet, error) {
 
 	pkt, err := a.stream.Recv()
 	if err != nil && err != io.EOF {
-		metrics.Metrics.ObserveFailure(metrics.DirectionFromServer)
+		metrics.Metrics.ObserveServerFailureDeprecated(metrics.DirectionFromServer)
+		metrics.Metrics.ObserveStreamErrorNoPacket(commonmetrics.SegmentToAgent, err)
 	}
 	return pkt, err
 }
@@ -427,6 +437,7 @@ func (a *Client) Serve(biDirectional bool) {
 
 		klog.V(5).InfoS("[tracing] recv packet", "type", pkt.Type)
 
+		metrics.Metrics.ObservePacket(commonmetrics.SegmentToAgent, pkt.Type)
 		switch pkt.Type {
 		case client.PacketType_DIAL_REQ:
 			a.handleDialRequest(pkt)
@@ -456,13 +467,13 @@ func (a *Client) Serve(biDirectional bool) {
 }
 
 func (a *Client) handleDialRequest(pkt *client.Packet) {
-	klog.V(4).InfoS("received DIAL_REQ", "serverID", a.serverID, "agentID", a.agentID)
+	dialReq := pkt.GetDialRequest()
+	klog.V(3).InfoS("Received DIAL_REQ", "serverID", a.serverID, "agentID", a.agentID, "dialID", dialReq.Random, "dialAddress", dialReq.Address)
 	dialResp := &client.Packet{
 		Type:    client.PacketType_DIAL_RSP,
 		Payload: &client.Packet_DialResponse{DialResponse: &client.DialResponse{}},
 	}
 
-	dialReq := pkt.GetDialRequest()
 	dialResp.GetDialResponse().Random = dialReq.Random
 
 	// Even identifiers are used for connections from master to node network,
@@ -483,7 +494,7 @@ func (a *Client) handleDialRequest(pkt *client.Packet) {
 			klog.ErrorS(fmt.Errorf("connection is nil"), "cannot send CLOSE_RESP to nil connection")
 			return
 		}
-		klog.V(4).InfoS("close connection", "connectionID", connID)
+		klog.V(4).InfoS("close connection", "dialID", dialReq.Random, "connectionID", connID, "dialAddress", dialReq.Address)
 		var closePkt *client.Packet
 		if connID == 0 {
 			closePkt = &client.Packet{
@@ -520,15 +531,21 @@ func (a *Client) handleDialRequest(pkt *client.Packet) {
 		start := time.Now()
 		conn, err := net.DialTimeout(dialReq.Protocol, dialReq.Address, dialTimeout)
 		if err != nil {
-			klog.ErrorS(err, "error dialing backend", "dialID", dialReq.Random)
+			reason := metrics.DialFailureUnknown
+			if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
+				reason = metrics.DialFailureTimeout
+			}
+			metrics.Metrics.ObserveDialFailure(reason)
+			klog.ErrorS(err, "error dialing backend", "dialID", dialReq.Random, "connectionID", connID, "dialAddress", dialReq.Address)
 			dialResp.GetDialResponse().Error = err.Error()
 			if err := a.Send(dialResp); err != nil {
-				klog.ErrorS(err, "could not send dialResp")
+				klog.ErrorS(err, "could not send dialResp", "dialID", dialReq.Random, "connectionID", connID)
 			}
 			// Cannot invoke clean up as we have no conn yet.
 			return
 		}
 		metrics.Metrics.ObserveDialLatency(time.Since(start))
+		klog.V(3).InfoS("Endpoint connection established", "dialID", dialReq.Random, "connectionID", connID, "dialAddress", dialReq.Address)
 		connCtx.conn = conn
 		a.connManager.Add(connID, connCtx)
 		dialResp.GetDialResponse().ConnectID = connID
@@ -541,7 +558,7 @@ func (a *Client) handleDialRequest(pkt *client.Packet) {
 			"dialAddress", dialReq.Address,
 		)
 		if err := a.Send(dialResp); err != nil {
-			klog.ErrorS(err, "could not send dialResp")
+			klog.ErrorS(err, "could not send dialResp", "dialID", dialReq.Random)
 			// clean-up is normally called from remoteToProxy which we will never invoke.
 			// So we are invoking it here to force the clean-up to occur.
 			// However, cleanup will block until dialDone is closed.
@@ -549,7 +566,6 @@ func (a *Client) handleDialRequest(pkt *client.Packet) {
 			go runpprof.Do(context.Background(), labels, func(context.Context) { connCtx.cleanup() })
 			return
 		}
-		klog.V(3).InfoS("Proxying new connection", "connectionID", connID)
 		go runpprof.Do(context.Background(), labels, func(context.Context) { a.agentToProxy(connID, connCtx) })
 		go runpprof.Do(context.Background(), labels, func(context.Context) { a.proxyToAgent(connID, connCtx) })
 	})
@@ -681,7 +697,7 @@ func (a *Client) agentToProxy(connID int64, ctx *connContext) {
 		if panicInfo := recover(); panicInfo != nil {
 			klog.V(2).InfoS("Exiting remoteToProxy with recovery", "panicInfo", panicInfo, "connectionID", connID)
 		} else {
-			klog.V(3).InfoS("Exiting remoteToProxy", "connectionID", connID)
+			klog.V(4).InfoS("Exiting remoteToProxy", "connectionID", connID)
 		}
 	}()
 	defer ctx.cleanup()
@@ -723,7 +739,7 @@ func (a *Client) proxyToAgent(connID int64, ctx *connContext) {
 		if panicInfo := recover(); panicInfo != nil {
 			klog.V(2).InfoS("Exiting proxyToRemote with recovery", "panicInfo", panicInfo, "connectionID", connID)
 		} else {
-			klog.V(3).InfoS("Exiting proxyToRemote", "connectionID", connID)
+			klog.V(4).InfoS("Exiting proxyToRemote", "connectionID", connID)
 		}
 	}()
 	// Not safe to call cleanup here, as cleanup() closes the dataCh

@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package tests
 
 import (
@@ -20,10 +36,14 @@ import (
 	"google.golang.org/grpc/metadata"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/client"
+	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/client/metrics"
+	metricsclient "sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/client/metrics"
+	clientmetricstest "sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/common/metrics/testing"
 	clientproto "sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/agent"
+	metricsagent "sigs.k8s.io/apiserver-network-proxy/pkg/agent/metrics"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/server"
-	"sigs.k8s.io/apiserver-network-proxy/pkg/server/metrics"
+	metricsserver "sigs.k8s.io/apiserver-network-proxy/pkg/server/metrics"
 	metricstest "sigs.k8s.io/apiserver-network-proxy/pkg/testing/metrics"
 	agentproto "sigs.k8s.io/apiserver-network-proxy/proto/agent"
 	"sigs.k8s.io/apiserver-network-proxy/proto/header"
@@ -169,10 +189,13 @@ func TestProxyHandleDialError_GRPC(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
-	if err := metricstest.ExpectDialFailure(metrics.DialFailureErrorResponse, 1); err != nil {
+	if err := metricstest.ExpectServerDialFailure(metricsserver.DialFailureErrorResponse, 1); err != nil {
 		t.Error(err)
 	}
-	metrics.Metrics.Reset() // For clean shutdown.
+	if err := metricstest.ExpectAgentDialFailure(metricsagent.DialFailureUnknown, 1); err != nil {
+		t.Error(err)
+	}
+	resetAllMetrics() // For clean shutdown.
 }
 
 func TestProxyHandle_DoneContext_GRPC(t *testing.T) {
@@ -304,7 +327,7 @@ func TestProxyDial_RequestCancelled_GRPC(t *testing.T) {
 		_, err = tunnel.DialContext(ctx, "tcp", blackhole)
 		if err == nil {
 			t.Error("Expected error when context is cancelled, did not receive error")
-		} else if _, reason := client.GetDialFailureReason(err); reason != client.DialFailureContext {
+		} else if _, reason := client.GetDialFailureReason(err); reason != metricsclient.DialFailureContext {
 			t.Errorf("Unexpected error: %v", err)
 		}
 
@@ -315,10 +338,13 @@ func TestProxyDial_RequestCancelled_GRPC(t *testing.T) {
 		}
 	}()
 
-	if err := metricstest.ExpectDialFailure(metrics.DialFailureFrontendClose, 1); err != nil {
+	if err := clientmetricstest.ExpectClientDialFailure(metrics.DialFailureContext, 1); err != nil {
 		t.Error(err)
 	}
-	metrics.Metrics.Reset() // For clean shutdown.
+	if err := metricstest.ExpectServerDialFailure(metricsserver.DialFailureFrontendClose, 1); err != nil {
+		t.Error(err)
+	}
+	resetAllMetrics() // For clean shutdown.
 }
 
 func TestProxyDial_AgentTimeout_GRPC(t *testing.T) {
@@ -349,14 +375,20 @@ func TestProxyDial_AgentTimeout_GRPC(t *testing.T) {
 		_, err = tunnel.DialContext(context.Background(), "tcp", blackhole)
 		if err == nil {
 			t.Error("Expected error when context is cancelled, did not receive error")
-		} else if _, reason := client.GetDialFailureReason(err); reason != client.DialFailureEndpoint {
+		} else if _, reason := client.GetDialFailureReason(err); reason != metricsclient.DialFailureEndpoint {
 			t.Errorf("Unexpected error: %v", err)
 		}
 
-		if err := metricstest.ExpectDialFailure(metrics.DialFailureErrorResponse, 1); err != nil {
+		if err := clientmetricstest.ExpectClientDialFailure(metrics.DialFailureEndpoint, 1); err != nil {
 			t.Error(err)
 		}
-		metrics.Metrics.Reset() // For clean shutdown.
+		if err := metricstest.ExpectServerDialFailure(metricsserver.DialFailureErrorResponse, 1); err != nil {
+			t.Error(err)
+		}
+		if err := metricstest.ExpectAgentDialFailure(metricsagent.DialFailureTimeout, 1); err != nil {
+			t.Error(err)
+		}
+		resetAllMetrics() // For clean shutdown.
 
 		select {
 		case <-tunnel.Done():
@@ -607,10 +639,13 @@ func TestFailedDial_HTTPCONN(t *testing.T) {
 		t.Errorf("while waiting for connection to be closed: %v", err)
 	}
 
-	if err := metricstest.ExpectDialFailure(metrics.DialFailureErrorResponse, 1); err != nil {
+	if err := metricstest.ExpectServerDialFailure(metricsserver.DialFailureErrorResponse, 1); err != nil {
 		t.Error(err)
 	}
-	metrics.Metrics.Reset() // For clean shutdown.
+	if err := metricstest.ExpectAgentDialFailure(metricsagent.DialFailureUnknown, 1); err != nil {
+		t.Error(err)
+	}
+	resetAllMetrics() // For clean shutdown.
 }
 
 func localAddr(addr net.Addr) string {
@@ -770,7 +805,7 @@ func (a *unresponsiveAgent) Close() {
 
 // waitForConnectedServerCount waits for the agent ClientSet to have the expected number of health
 // server connections (HealthyClientsCount).
-func waitForConnectedServerCount(t *testing.T, expectedServerCount int, clientset *agent.ClientSet) {
+func waitForConnectedServerCount(t testing.TB, expectedServerCount int, clientset *agent.ClientSet) {
 	t.Helper()
 	err := wait.PollImmediate(100*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
 		hc := clientset.HealthyClientsCount()
@@ -788,7 +823,7 @@ func waitForConnectedServerCount(t *testing.T, expectedServerCount int, clientse
 
 // waitForConnectedAgentCount waits for the proxy server to have the expected number of registered
 // agents (backends). This assumes the ProxyServer is using a single ProxyStrategy.
-func waitForConnectedAgentCount(t *testing.T, expectedAgentCount int, proxy *server.ProxyServer) {
+func waitForConnectedAgentCount(t testing.TB, expectedAgentCount int, proxy *server.ProxyServer) {
 	t.Helper()
 	err := wait.PollImmediate(100*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
 		count := proxy.BackendManagers[0].NumBackends()
@@ -804,18 +839,40 @@ func waitForConnectedAgentCount(t *testing.T, expectedAgentCount int, proxy *ser
 	}
 }
 
-func assertNoDialFailures(t *testing.T) {
+func assertNoClientDialFailures(t testing.TB) {
 	t.Helper()
-	if err := metricstest.ExpectDialFailures(nil); err != nil {
-		t.Errorf("Unexpected %s metric: %v", metrics.DialFailuresMetric, err)
+	if err := clientmetricstest.ExpectClientDialFailures(nil); err != nil {
+		t.Errorf("Unexpected %s metric: %v", "dial_failure_total", err)
 	}
 }
 
-func expectCleanShutdown(t *testing.T) {
-	metrics.Metrics.Reset()
+func assertNoServerDialFailures(t testing.TB) {
+	t.Helper()
+	if err := metricstest.ExpectServerDialFailures(nil); err != nil {
+		t.Errorf("Unexpected %s metric: %v", metricsserver.DialFailuresMetric, err)
+	}
+}
+
+func assertNoAgentDialFailures(t testing.TB) {
+	t.Helper()
+	if err := metricstest.ExpectAgentDialFailures(nil); err != nil {
+		t.Errorf("Unexpected %s metric: %v", "endpoint_dial_failure_total", err)
+	}
+}
+
+func resetAllMetrics() {
+	metricsclient.Metrics.Reset()
+	metricsserver.Metrics.Reset()
+	metricsagent.Metrics.Reset()
+}
+
+func expectCleanShutdown(t testing.TB) {
+	resetAllMetrics()
 	currentGoRoutines := goleak.IgnoreCurrent()
 	t.Cleanup(func() {
 		goleak.VerifyNone(t, currentGoRoutines)
-		assertNoDialFailures(t)
+		assertNoClientDialFailures(t)
+		assertNoServerDialFailures(t)
+		assertNoAgentDialFailures(t)
 	})
 }
