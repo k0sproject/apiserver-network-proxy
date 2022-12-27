@@ -711,13 +711,13 @@ func (s *ProxyServer) Connect(stream agent.AgentService_ConnectServer) error {
 	}
 
 	klog.V(2).InfoS("Agent connected", "agentID", agentID, "serverID", s.serverID)
-	var nilBackend Backend = nil
 	backend := s.addBackend(agentID, stream)
+	// we can't compare `backend` to nil equality because it is interface variable
+	var nilBackend Backend // = nil
 	if backend == nilBackend {
 		klog.V(2).InfoS("Unable to add backend", "agentID", agentID, "serverID", s.serverID)
 		return fmt.Errorf("no backend added")
 	}
-	// we can't compare `backend` to nil equality because it is interface variable
 	defer s.removeBackend(agentID, stream)
 	recvCh := make(chan *client.Packet, xfrChannelSize)
 
