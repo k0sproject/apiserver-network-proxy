@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/apiserver-network-proxy/pkg/agent/metrics"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/features"
 )
 
@@ -112,6 +113,7 @@ func (cs *ClientSet) addClientLocked(serverID string, c *Client) error {
 	}
 	cs.clients[serverID] = c
 	cs.serverIDs = append(cs.serverIDs, serverID)
+	metrics.Metrics.SetServerConnectionsCount(len(cs.clients))
 	return nil
 
 }
@@ -137,6 +139,7 @@ func (cs *ClientSet) RemoveClient(serverID string) {
 		}
 	}
 	delete(cs.clients, serverID)
+	metrics.Metrics.SetServerConnectionsCount(len(cs.clients))
 }
 
 type ClientSetConfig struct {

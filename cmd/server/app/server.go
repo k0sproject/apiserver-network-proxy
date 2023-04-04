@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package app
 
 import (
@@ -375,14 +391,18 @@ func (p *Proxy) runAdminServer(o *options.ProxyRunOptions, server *server.ProxyS
 	if o.EnableProfiling {
 		muxHandler.HandleFunc("/debug/pprof", util.RedirectTo("/debug/pprof/"))
 		muxHandler.HandleFunc("/debug/pprof/", netpprof.Index)
+		muxHandler.HandleFunc("/debug/pprof/profile", netpprof.Profile)
+		muxHandler.HandleFunc("/debug/pprof/symbol", netpprof.Symbol)
+		muxHandler.HandleFunc("/debug/pprof/trace", netpprof.Trace)
 		if o.EnableContentionProfiling {
 			runtime.SetBlockProfileRate(1)
 		}
 	}
 	adminServer := &http.Server{
-		Addr:           fmt.Sprintf("127.0.0.1:%d", o.AdminPort),
-		Handler:        muxHandler,
-		MaxHeaderBytes: 1 << 20,
+		Addr:              net.JoinHostPort(o.AdminBindAddress, strconv.Itoa(o.AdminPort)),
+		Handler:           muxHandler,
+		MaxHeaderBytes:    1 << 20,
+		ReadHeaderTimeout: ReadHeaderTimeout,
 	}
 
 	labels := runpprof.Labels(

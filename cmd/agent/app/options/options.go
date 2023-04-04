@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package options
 
 import (
@@ -30,10 +46,14 @@ type GrpcProxyAgentOptions struct {
 	ProxyServerPort int
 	AlpnProtos      []string
 
-	// Ports for the health and admin server
+	// Bind address for the health connections.
 	HealthServerHost string
+	// Port we listen for health connections on.
 	HealthServerPort int
-	AdminServerPort  int
+	// Bind address for the admin connections.
+	AdminBindAddress string
+	// Port we listen for admin connections on.
+	AdminServerPort int
 	// Enables pprof at host:adminPort/debug/pprof.
 	EnableProfiling bool
 	// If EnableProfiling is true, this enables the lock contention
@@ -59,9 +79,9 @@ type GrpcProxyAgentOptions struct {
 	// The check is an "unlocked" read but is still use at your own peril.
 	WarnOnChannelLimit bool
 
-	SyncForever bool
-	BindAddress        string
-	ApiServerMapping   portMapping
+	SyncForever      bool
+	BindAddress      string
+	APIServerMapping portMapping
 }
 
 var _ pflag.Value = &portMapping{}
@@ -108,6 +128,7 @@ func (o *GrpcProxyAgentOptions) Flags() *pflag.FlagSet {
 	flags.StringVar(&o.HealthServerHost, "health-server-host", o.HealthServerHost, "The host address to listen on, without port.")
 	flags.IntVar(&o.HealthServerPort, "health-server-port", o.HealthServerPort, "The port the health server is listening on.")
 	flags.IntVar(&o.AdminServerPort, "admin-server-port", o.AdminServerPort, "The port the admin server is listening on.")
+	flags.StringVar(&o.AdminBindAddress, "admin-bind-address", o.AdminBindAddress, "Bind address for admin connections. If empty, we will bind to all interfaces.")
 	flags.BoolVar(&o.EnableProfiling, "enable-profiling", o.EnableProfiling, "enable pprof at host:admin-port/debug/pprof")
 	flags.BoolVar(&o.EnableContentionProfiling, "enable-contention-profiling", o.EnableContentionProfiling, "enable contention profiling at host:admin-port/debug/pprof/block. \"--enable-profiling\" must also be set.")
 	flags.StringVar(&o.AgentID, "agent-id", o.AgentID, "The unique ID of this agent. Can also be set by the 'PROXY_AGENT_ID' environment variable. Default to a generated uuid if not set.")
@@ -118,7 +139,7 @@ func (o *GrpcProxyAgentOptions) Flags() *pflag.FlagSet {
 	flags.StringVar(&o.ServiceAccountTokenPath, "service-account-token-path", o.ServiceAccountTokenPath, "If non-empty proxy agent uses this token to prove its identity to the proxy server.")
 	flags.StringVar(&o.AgentIdentifiers, "agent-identifiers", o.AgentIdentifiers, "Identifiers of the agent that will be used by the server when choosing agent. N.B. the list of identifiers must be in URL encoded format. e.g.,host=localhost&host=node1.mydomain.com&cidr=127.0.0.1/16&ipv4=1.2.3.4&ipv4=5.6.7.8&ipv6=:::::&default-route=true")
 	flags.BoolVar(&o.WarnOnChannelLimit, "warn-on-channel-limit", o.WarnOnChannelLimit, "Turns on a warning if the system is going to push to a full channel. The check involves an unsafe read.")
-	flags.Var(&o.ApiServerMapping, "apiserver-port-mapping", "Mapping between a local port and the host:port used to reach the Kubernetes API Server")
+	flags.Var(&o.APIServerMapping, "apiserver-port-mapping", "Mapping between a local port and the host:port used to reach the Kubernetes API Server")
 	flags.StringVar(&o.BindAddress, "bind-address", o.BindAddress, "Address used to listen for traffic generated on cluster network")
 	// add feature gates flag
 	features.DefaultMutableFeatureGate.AddFlag(flags)
@@ -135,6 +156,7 @@ func (o *GrpcProxyAgentOptions) Print() {
 	klog.V(1).Infof("ALPNProtos set to %+s.\n", o.AlpnProtos)
 	klog.V(1).Infof("HealthServerHost set to %s\n", o.HealthServerHost)
 	klog.V(1).Infof("HealthServerPort set to %d.\n", o.HealthServerPort)
+	klog.V(1).Infof("Admin bind address set to %q.\n", o.AdminBindAddress)
 	klog.V(1).Infof("AdminServerPort set to %d.\n", o.AdminServerPort)
 	klog.V(1).Infof("EnableProfiling set to %v.\n", o.EnableProfiling)
 	klog.V(1).Infof("EnableContentionProfiling set to %v.\n", o.EnableContentionProfiling)
@@ -148,7 +170,7 @@ func (o *GrpcProxyAgentOptions) Print() {
 	klog.V(1).Infof("WarnOnChannelLimit set to %t.\n", o.WarnOnChannelLimit)
 	if features.DefaultMutableFeatureGate.Enabled(features.NodeToMasterTraffic) {
 		klog.V(1).Infof("AgentBindAddress set to %s.\n", o.BindAddress)
-		klog.V(1).Infof("Apiserver port mapping set to %s.\n", o.ApiServerMapping.String())
+		klog.V(1).Infof("Apiserver port mapping set to %s.\n", o.APIServerMapping.String())
 	}
 	klog.V(1).Infof("SyncForever set to %v.\n", o.SyncForever)
 }
@@ -201,20 +223,20 @@ func (o *GrpcProxyAgentOptions) Validate() error {
 	if err := validateHostnameOrIP(o.BindAddress); err != nil {
 		return fmt.Errorf("agent bind address is invalid: %v", err)
 	}
-	if err := validateHostnameOrIP(o.ApiServerMapping.RemoteHost); err != nil {
+	if err := validateHostnameOrIP(o.APIServerMapping.RemoteHost); err != nil {
 		return fmt.Errorf("apiserver address is invalid: %v", err)
 	}
-	if o.ApiServerMapping.LocalPort > 49151 {
-		return fmt.Errorf("please do not try to use ephemeral port %d for the apiserver local port", o.ApiServerMapping.LocalPort)
+	if o.APIServerMapping.LocalPort > 49151 {
+		return fmt.Errorf("please do not try to use ephemeral port %d for the apiserver local port", o.APIServerMapping.LocalPort)
 	}
-	if o.ApiServerMapping.LocalPort < 1024 {
-		return fmt.Errorf("please do not try to use reserved port %d for the apiserver local port", o.ApiServerMapping.LocalPort)
+	if o.APIServerMapping.LocalPort < 1024 {
+		return fmt.Errorf("please do not try to use reserved port %d for the apiserver local port", o.APIServerMapping.LocalPort)
 	}
-	if o.ApiServerMapping.RemotePort > 49151 {
-		return fmt.Errorf("please do not try to use ephemeral port %d for the apiserver remote port", o.ApiServerMapping.LocalPort)
+	if o.APIServerMapping.RemotePort > 49151 {
+		return fmt.Errorf("please do not try to use ephemeral port %d for the apiserver remote port", o.APIServerMapping.LocalPort)
 	}
-	if o.ApiServerMapping.RemotePort < 1 {
-		return fmt.Errorf("invalid port %d for the apiserver remote port", o.ApiServerMapping.RemotePort)
+	if o.APIServerMapping.RemotePort < 1 {
+		return fmt.Errorf("invalid port %d for the apiserver remote port", o.APIServerMapping.RemotePort)
 	}
 	return nil
 }
@@ -259,6 +281,7 @@ func NewGrpcProxyAgentOptions() *GrpcProxyAgentOptions {
 		ProxyServerPort:           8091,
 		HealthServerHost:          "",
 		HealthServerPort:          8093,
+		AdminBindAddress:          "127.0.0.1",
 		AdminServerPort:           8094,
 		EnableProfiling:           false,
 		EnableContentionProfiling: false,
@@ -271,7 +294,7 @@ func NewGrpcProxyAgentOptions() *GrpcProxyAgentOptions {
 		ServiceAccountTokenPath:   "",
 		WarnOnChannelLimit:        false,
 		SyncForever:               false,
-		ApiServerMapping:          portMapping{LocalPort: 6443, RemoteHost: "localhost", RemotePort: 6443},
+		APIServerMapping:          portMapping{LocalPort: 6443, RemoteHost: "localhost", RemotePort: 6443},
 		BindAddress:               "127.0.0.1",
 	}
 	return &o

@@ -242,12 +242,12 @@ func (f testStream) Context() context.Context {
 	return ctx
 }
 
-func (t testStream) Send(packet *client.Packet) error {
+func (f testStream) Send(packet *client.Packet) error {
 	return nil
 }
 
-func (t testStream) Recv() (*client.Packet, error) {
-	v, ok := <-t.ch
+func (f testStream) Recv() (*client.Packet, error) {
+	v, ok := <-f.ch
 	if !ok {
 		return nil, io.EOF
 	}
@@ -265,7 +265,7 @@ func TestNodeToControlPlane(t *testing.T) {
 		&AgentTokenAuthenticationOptions{})
 
 	// start a controlplane server
-	lis, err := net.Listen("tcp", ":0")
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		panic(err)
 	}
@@ -345,7 +345,7 @@ func packetDialReq(addr string) *client.Packet {
 			DialRequest: &client.DialRequest{
 				Protocol: "tcp",
 				Address:  addr,
-				Random:   rand.Int63(),
+				Random:   rand.Int63(), /* #nosec G404 */
 			},
 		},
 	}

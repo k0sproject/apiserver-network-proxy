@@ -36,6 +36,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+
+	commonmetrics "sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/common/metrics"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
 	pkgagent "sigs.k8s.io/apiserver-network-proxy/pkg/agent"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/server/metrics"
@@ -66,11 +68,17 @@ const (
 )
 
 func (c *ProxyClientConnection) send(pkt *client.Packet) error {
+	const segment = commonmetrics.SegmentToClient
+	metrics.Metrics.ObservePacket(segment, pkt.Type)
 	start := time.Now()
 	defer metrics.Metrics.ObserveFrontendWriteLatency(time.Since(start))
 	if c.Mode == "grpc" {
 		stream := c.Grpc
-		return stream.Send(pkt)
+		err := stream.Send(pkt)
+		if err != nil {
+			metrics.Metrics.ObserveStreamError(segment, err, pkt.Type)
+		}
+		return err
 	} else if c.Mode == "http-connect" {
 		if pkt.Type == client.PacketType_CLOSE_RSP {
 			return c.CloseHTTP()
@@ -278,7 +286,6 @@ func (s *ProxyServer) removeBackend(agentID string, conn agent.AgentService_Conn
 }
 
 func (s *ProxyServer) addFrontend(agentID string, connID int64, p *ProxyClientConnection) {
-	klog.V(2).InfoS("Register frontend for agent", "frontend", p, "agentID", agentID, "connectionID", connID)
 	s.fmu.Lock()
 	defer s.fmu.Unlock()
 	if _, ok := s.frontends[agentID]; !ok {
@@ -299,7 +306,6 @@ func (s *ProxyServer) removeFrontend(agentID string, connID int64) {
 		klog.V(2).InfoS("Cannot find connection for agent in the frontends", "connectionID", connID, "agentID", agentID)
 		return
 	}
-	klog.V(2).InfoS("Remove frontend for agent", "frontend", conns[connID], "agentID", agentID, "connectionID", connID)
 	delete(s.frontends[agentID], connID)
 	if len(s.frontends[agentID]) == 0 {
 		delete(s.frontends, agentID)
@@ -377,7 +383,7 @@ func (s *ProxyServer) Proxy(stream client.ProxyService_ProxyServer) error {
 		return fmt.Errorf("failed to get context")
 	}
 	userAgent := md.Get(header.UserAgent)
-	klog.V(2).InfoS("Proxy request from client", "userAgent", userAgent, "serverID", s.serverID)
+	klog.V(5).InfoS("Proxy request from client", "userAgent", userAgent, "serverID", s.serverID)
 
 	recvCh := make(chan *client.Packet, xfrChannelSize)
 	stopCh := make(chan error)
@@ -389,7 +395,6 @@ func (s *ProxyServer) Proxy(stream client.ProxyService_ProxyServer) error {
 	go runpprof.Do(context.Background(), labels, func(context.Context) { s.serveRecvFrontend(stream, recvCh) })
 
 	defer func() {
-		klog.V(2).InfoS("Receive channel from frontend is stopping", "userAgent", userAgent)
 		close(recvCh)
 	}()
 
@@ -403,11 +408,14 @@ func (s *ProxyServer) readFrontendToChannel(stream client.ProxyService_ProxyServ
 	for {
 		in, err := stream.Recv()
 		if err == io.EOF {
+			// TODO: Log an error if the frontend connection stops without first closing any open connections.
 			klog.V(2).InfoS("Receive stream from frontend closed", "userAgent", userAgent)
 			close(stopCh)
 			return
 		}
+		const segment = commonmetrics.SegmentFromClient
 		if err != nil {
+			metrics.Metrics.ObserveStreamErrorNoPacket(segment, err)
 			if status.Code(err) == codes.Canceled {
 				klog.V(2).InfoS("Stream read from frontend cancelled", "userAgent", userAgent)
 			} else {
@@ -417,6 +425,7 @@ func (s *ProxyServer) readFrontendToChannel(stream client.ProxyService_ProxyServ
 			close(stopCh)
 			return
 		}
+		metrics.Metrics.ObservePacket(segment, in.Type)
 
 		select {
 		case recvCh <- in: // Send didn't block, carry on.
@@ -462,7 +471,10 @@ func (s *ProxyServer) serveRecvFrontend(stream client.ProxyService_ProxyServer, 
 						},
 					},
 				}
+				const segment = commonmetrics.SegmentToClient
+				metrics.Metrics.ObservePacket(segment, resp.Type)
 				if err := stream.Send(resp); err != nil {
+					metrics.Metrics.ObserveStreamError(segment, err, resp.Type)
 					klog.V(5).InfoS("Failed to send DIAL_RSP for no backend", "error", err, "dialID", random)
 				}
 				// The Dial is failing; no reason to keep this goroutine.
@@ -539,6 +551,7 @@ func (s *ProxyServer) serveRecvFrontend(stream client.ProxyService_ProxyServer, 
 		}
 	}
 
+	// TODO: Log an error if the frontend stream is closed with an established tunnel still open.
 	klog.V(5).InfoS("Close streaming", "connectionID", firstConnID)
 
 	if backend == nil {
@@ -594,7 +607,7 @@ func getAgentIdentifiers(stream agent.AgentService_ConnectServer) (pkgagent.Iden
 	return agentIdentifiers, nil
 }
 
-func (s *ProxyServer) validateAuthToken(ctx context.Context, token string) error {
+func (s *ProxyServer) validateAuthToken(ctx context.Context, token string) (username string, err error) {
 	trReq := &authv1.TokenReview{
 		Spec: authv1.TokenReviewSpec{
 			Token:     token,
@@ -603,38 +616,39 @@ func (s *ProxyServer) validateAuthToken(ctx context.Context, token string) error
 	}
 	r, err := s.AgentAuthenticationOptions.KubernetesClient.AuthenticationV1().TokenReviews().Create(ctx, trReq, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to authenticate request. err:%v", err)
+		return "", fmt.Errorf("Failed to authenticate request. err:%v", err)
 	}
 
 	if r.Status.Error != "" {
-		return fmt.Errorf("lookup failed: %s", r.Status.Error)
+		return "", fmt.Errorf("lookup failed: %s", r.Status.Error)
 	}
 
 	if !r.Status.Authenticated {
-		return fmt.Errorf("lookup failed: service account jwt not valid")
+		return "", fmt.Errorf("lookup failed: service account jwt not valid")
 	}
 
 	// The username is of format: system:serviceaccount:(NAMESPACE):(SERVICEACCOUNT)
-	parts := strings.Split(r.Status.User.Username, ":")
+	username = r.Status.User.Username
+	parts := strings.Split(username, ":")
 	if len(parts) != 4 {
-		return fmt.Errorf("lookup failed: unexpected username format")
+		return "", fmt.Errorf("lookup failed: unexpected username format")
 	}
 	// Validate the user that comes back from token review is a service account
 	if parts[0] != "system" || parts[1] != "serviceaccount" {
-		return fmt.Errorf("lookup failed: username returned is not a service account")
+		return "", fmt.Errorf("lookup failed: username returned is not a service account")
 	}
 
 	ns := parts[2]
 	sa := parts[3]
 	if s.AgentAuthenticationOptions.AgentNamespace != ns {
-		return fmt.Errorf("lookup failed: incoming request from %q namespace. Expected %q", ns, s.AgentAuthenticationOptions.AgentNamespace)
+		return "", fmt.Errorf("lookup failed: incoming request from %q namespace. Expected %q", ns, s.AgentAuthenticationOptions.AgentNamespace)
 	}
 
 	if s.AgentAuthenticationOptions.AgentServiceAccount != sa {
-		return fmt.Errorf("lookup failed: incoming request from %q service account. Expected %q", sa, s.AgentAuthenticationOptions.AgentServiceAccount)
+		return "", fmt.Errorf("lookup failed: incoming request from %q service account. Expected %q", sa, s.AgentAuthenticationOptions.AgentServiceAccount)
 	}
 
-	return nil
+	return username, nil
 }
 
 func (s *ProxyServer) authenticateAgentViaToken(ctx context.Context) error {
@@ -656,11 +670,12 @@ func (s *ProxyServer) authenticateAgentViaToken(ctx context.Context) error {
 		return fmt.Errorf("received token does not have %q prefix", header.AuthenticationTokenContextSchemePrefix)
 	}
 
-	if err := s.validateAuthToken(ctx, strings.TrimPrefix(authContext[0], header.AuthenticationTokenContextSchemePrefix)); err != nil {
-		return fmt.Errorf("failed to validate authentication token, err:%v", err)
+	username, err := s.validateAuthToken(ctx, strings.TrimPrefix(authContext[0], header.AuthenticationTokenContextSchemePrefix))
+	if err != nil {
+		return fmt.Errorf("Failed to validate authentication token, err:%v", err)
 	}
 
-	klog.V(2).Infoln("Client successfully authenticated via token")
+	klog.V(5).InfoS("Agent successfully authenticated via token", "username", username)
 	return nil
 }
 
@@ -674,7 +689,7 @@ func (s *ProxyServer) Connect(stream agent.AgentService_ConnectServer) error {
 		return err
 	}
 
-	klog.V(2).InfoS("Connect request from agent", "agentID", agentID, "serverID", s.serverID)
+	klog.V(5).InfoS("Connect request from agent", "agentID", agentID, "serverID", s.serverID)
 	labels := runpprof.Labels(
 		"serverCount", strconv.Itoa(s.serverCount),
 		"agentID", agentID,
@@ -695,20 +710,20 @@ func (s *ProxyServer) Connect(stream agent.AgentService_ConnectServer) error {
 		return err
 	}
 
-	var nilBackend Backend = nil
+	klog.V(2).InfoS("Agent connected", "agentID", agentID, "serverID", s.serverID)
 	backend := s.addBackend(agentID, stream)
+	// we can't compare `backend` to nil equality because it is interface variable
+	var nilBackend Backend // = nil
 	if backend == nilBackend {
 		klog.V(2).InfoS("Unable to add backend", "agentID", agentID, "serverID", s.serverID)
 		return fmt.Errorf("no backend added")
 	}
-	// we can't compare `backend` to nil equality because it is interface variable
 	defer s.removeBackend(agentID, stream)
 	recvCh := make(chan *client.Packet, xfrChannelSize)
 
 	go runpprof.Do(context.Background(), labels, func(context.Context) { s.serveRecvBackend(backend, stream, agentID, recvCh) })
 
 	defer func() {
-		klog.V(2).InfoS("Receive channel from agent is stopping", "agentID", agentID)
 		close(recvCh)
 	}()
 
@@ -726,12 +741,15 @@ func (s *ProxyServer) readBackendToChannel(stream agent.AgentService_ConnectServ
 			close(stopCh)
 			return
 		}
+		const segment = commonmetrics.SegmentFromAgent
 		if err != nil {
+			metrics.Metrics.ObserveStreamErrorNoPacket(segment, err)
 			klog.ErrorS(err, "Receive stream from agent read failure")
 			stopCh <- err
 			close(stopCh)
 			return
 		}
+		metrics.Metrics.ObservePacket(segment, in.Type)
 
 		select {
 		case recvCh <- in: // Send didn't block, carry on.
@@ -904,6 +922,7 @@ func (s *ProxyServer) serveRecvBackend(backend Backend, stream agent.AgentServic
 	}
 	klog.V(5).InfoS("Close backend of agent", "backend", stream, "agentID", agentID)
 }
+
 func (s *ProxyServer) sendCloseRequest(stream agent.AgentService_ConnectServer, connectID int64, random int64, failMsg string) {
 	pkt := &client.Packet{
 		Type: client.PacketType_CLOSE_REQ,
@@ -913,7 +932,10 @@ func (s *ProxyServer) sendCloseRequest(stream agent.AgentService_ConnectServer, 
 			},
 		},
 	}
+	const segment = commonmetrics.SegmentToAgent
+	metrics.Metrics.ObservePacket(segment, pkt.Type)
 	if err := stream.Send(pkt); err != nil {
+		metrics.Metrics.ObserveStreamError(segment, err, pkt.Type)
 		klog.V(5).ErrorS(err, failMsg, "dialID", random, "agentID", agentID, "connectionID", connectID)
 	}
 }
